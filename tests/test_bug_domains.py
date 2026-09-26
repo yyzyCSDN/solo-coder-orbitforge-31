@@ -9,7 +9,9 @@ from orbitforge.environment.eclipse import eclipse_state
 from orbitforge.link.budget import free_space_loss_db,received_power_dbw
 from orbitforge.attitude.quaternion import Quaternion
 from orbitforge.conjunction.covariance import rotate_covariance_2d
-from orbitforge.conjunction.probability import collision_probability_2d
+from orbitforge.conjunction.probability import collision_probability_2d,collision_probability_at_tca
+from orbitforge.conjunction.propagation import propagate_covariance,covariance_2d_at_tca
+from orbitforge.core.errors import ValidationError
 from orbitforge.ephemeris.interpolation import EphemerisPoint,hermite
 from orbitforge.mission.windows import intersect_windows
 from orbitforge.core.state import TimeWindow
@@ -59,3 +61,38 @@ def test_b11_hermite_endpoints():
 
 def test_b12_window_half_open_semantics():
     a=[TimeWindow(0,10),TimeWindow(20,30)]; b=[TimeWindow(10,20),TimeWindow(25,35)]; out=intersect_windows(a,b); assert len(out)==1 and out[0]==TimeWindow(25,30)
+
+def _cov6(position_vars,velocity_vars,cross=None):
+    m=[[0.0]*6 for _ in range(6)]
+    for i,v in enumerate(position_vars+velocity_vars): m[i][i]=v
+    for (i,j),v in (cross or {}).items(): m[i][j]=v; m[j][i]=v
+    return m
+
+def test_b13_covariance_propagation_chain():
+    rel_r=Vec3(-1000,5,0); rel_v=Vec3(10,0,0)
+    p=_cov6([4.0,1.0,9.0],[0.01,0.02,0.03],{(1,2):2.0}); s=_cov6([1.0,1.0,1.0],[0.001,0.001,0.001])
+    cov2,r_tca,dt=covariance_2d_at_tca(rel_r,rel_v,p,s)
+    assert abs(dt-100)<1e-12 and abs(r_tca.x)<1e-9 and abs(r_tca.y-5)<1e-9
+    assert abs(cov2[0][0]-212)<1e-9 and abs(cov2[1][1]-320)<1e-9 and abs(cov2[0][1]-2)<1e-9 and abs(cov2[1][0]-2)<1e-9
+
+def test_b14_pc_from_6d_matches_2d():
+    rel_r=Vec3(-1000,5,0); rel_v=Vec3(10,0,0)
+    p=_cov6([4.0,1.0,9.0],[0.01,0.02,0.03],{(1,2):2.0}); s=_cov6([1.0,1.0,1.0],[0.001,0.001,0.001])
+    out=collision_probability_at_tca(rel_r,rel_v,p,s,0.05)
+    direct=collision_probability_2d(-5.0,0.0,((212.0,2.0),(2.0,320.0)),0.05)
+    assert abs(out['collision_probability']-direct)<1e-12 and abs(out['miss_distance_km']-5)<1e-9
+    assert out['collision_probability']>0
+
+def test_b15_invalid_covariance_rejected():
+    bad_asym=_cov6([1.0]*3,[0.001]*3); bad_asym[0][1]=0.5
+    bad_neg=_cov6([1.0,-1.0,1.0],[0.001]*3)
+    bad_semidef=_cov6([1.0,0.0,1.0],[0.001]*3)
+    for bad in (bad_asym,bad_neg,bad_semidef):
+        try: propagate_covariance(bad,100.0); assert False
+        except ValidationError: pass
+    try: collision_probability_2d(0,0,((1.0,0.5),(0.0,1.0)),0.05); assert False
+    except ValidationError: pass
+    try: collision_probability_2d(0,0,((-1.0,0.0),(0.0,-1.0)),0.05); assert False
+    except ValidationError: pass
+    try: collision_probability_at_tca(Vec3(-1000,5,0),Vec3(10,0,0),bad_neg,_cov6([1.0]*3,[0.001]*3),0.05); assert False
+    except ValidationError: pass
