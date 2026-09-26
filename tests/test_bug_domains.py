@@ -9,7 +9,9 @@ from orbitforge.environment.eclipse import eclipse_state
 from orbitforge.link.budget import free_space_loss_db,received_power_dbw
 from orbitforge.attitude.quaternion import Quaternion
 from orbitforge.conjunction.covariance import rotate_covariance_2d
-from orbitforge.conjunction.probability import collision_probability_2d
+from orbitforge.conjunction.probability import collision_probability_2d,collision_probability_from_state_covariance
+from orbitforge.conjunction.propagation import propagate_covariance,project_to_bplane,bplane_covariance_at_tca
+from orbitforge.core.errors import ValidationError
 from orbitforge.ephemeris.interpolation import EphemerisPoint,hermite
 from orbitforge.mission.windows import intersect_windows
 from orbitforge.core.state import TimeWindow
@@ -59,3 +61,40 @@ def test_b11_hermite_endpoints():
 
 def test_b12_window_half_open_semantics():
     a=[TimeWindow(0,10),TimeWindow(20,30)]; b=[TimeWindow(10,20),TimeWindow(25,35)]; out=intersect_windows(a,b); assert len(out)==1 and out[0]==TimeWindow(25,30)
+
+def test_b13_covariance_propagation_and_projection():
+    cov=[[0.0]*6 for _ in range(6)]
+    for i in range(6): cov[i][i]=1.0
+    cov[1][1]=4.0; cov[2][2]=1.0; cov[4][4]=0.01; cov[5][5]=0.01
+    p=propagate_covariance(cov,10.0); assert abs(p[1][1]-5.0)<1e-9 and abs(p[1][4]-0.1)<1e-9
+    b=project_to_bplane(p,Vec3(3.0,0.0,0.0)); assert abs(b[0][0]-5.0)<1e-9 and abs(b[1][1]-2.0)<1e-9 and abs(b[0][1])<1e-12
+
+def test_b14_covariance_chain_rejects_invalid():
+    eye=[[1.0 if i==j else 0.0 for j in range(6)] for i in range(6)]
+    asym=[r[:] for r in eye]; asym[0][1]=0.5
+    neg=[r[:] for r in eye]; neg[0][0]=-1.0
+    corr=[r[:] for r in eye]; corr[0][1]=corr[1][0]=2.0
+    for bad in (asym,neg,corr):
+        try: propagate_covariance(bad,1.0); assert False
+        except ValidationError: pass
+
+def test_b15_cross_correlation_reaches_bplane():
+    base=[[1.0 if i==j else 0.0 for j in range(6)] for i in range(6)]; base[4][4]=0.01
+    cross=[r[:] for r in base]; cross[1][4]=cross[4][1]=0.05
+    a=bplane_covariance_at_tca(base,10.0,Vec3(1.0,0.0,0.0))
+    b=bplane_covariance_at_tca(cross,10.0,Vec3(1.0,0.0,0.0))
+    assert abs(a[0][0]-2.0)<1e-9 and abs(b[0][0]-3.0)<1e-9
+
+def test_b16_end_to_end_probability_matches_manual_chain():
+    rel_r=Vec3(-50.0,0.3,0.0); rel_v=Vec3(10.0,0.0,0.0)
+    cov6=[[0.0]*6 for _ in range(6)]
+    for i in range(3): cov6[i][i]=0.04
+    cov6[3][3]=cov6[4][4]=cov6[5][5]=1e-6
+    p=collision_probability_from_state_covariance(rel_r,rel_v,cov6,0.05)
+    cov_b=bplane_covariance_at_tca(cov6,5.0,rel_v)
+    q=collision_probability_2d(-0.3,0.0,cov_b,0.05)
+    assert abs(p-q)<1e-12 and 0<p<1
+
+def test_b17_probability_rejects_asymmetric_covariance():
+    try: collision_probability_2d(0,0,((1.0,0.5),(0.0,1.0)),.05); assert False
+    except ValidationError: pass
